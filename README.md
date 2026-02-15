@@ -137,6 +137,7 @@ If you want RGB + depth to appear as two webcam devices:
    ```bash
    python3 receiver_virtual_webcam.py --rgb-device /dev/video10 --depth-device /dev/video11
    ```
+   On iPhone, tap `START STREAMING`, enter host IP (USB tethering is often `172.20.10.2`) and port `8888`.
 3. Full setup and verification steps are in:
    - `PI_WEBCAM_QUICKSTART.md`
 

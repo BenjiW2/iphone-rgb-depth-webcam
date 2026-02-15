@@ -127,6 +127,7 @@ class WebcamBridgeReceiver:
         self.h264_pipe = None
         self.decoder_thread = None
         self.stop_event = threading.Event()
+        self.rgb_encoding = "h264"
 
         self.rgb_writer = None
         self.depth_writer = None
@@ -192,12 +193,7 @@ class WebcamBridgeReceiver:
         if frame_type == FRAME_TYPE_RGB:
             self.frames_received["rgb"] += 1
             self.bytes_received["rgb"] += frame["data_size"]
-            if self.h264_pipe and self.h264_pipe.stdin:
-                try:
-                    self.h264_pipe.stdin.write(frame["data"])
-                    self.h264_pipe.stdin.flush()
-                except (BrokenPipeError, OSError):
-                    pass
+            self._process_rgb_packet(frame["data"])
             return
 
         if frame_type == FRAME_TYPE_DEPTH:
@@ -213,11 +209,13 @@ class WebcamBridgeReceiver:
         depth_w = int(self.metadata.get("depthWidth", 256))
         depth_h = int(self.metadata.get("depthHeight", 192))
         fps = int(self.metadata.get("fps", 30))
+        self.rgb_encoding = str(self.metadata.get("rgbEncoding", "h264")).lower()
 
         print("Session metadata:")
         print(f"  RGB: {rgb_w}x{rgb_h}")
         print(f"  Depth: {depth_w}x{depth_h}")
         print(f"  FPS: {fps}")
+        print(f"  RGB encoding: {self.rgb_encoding}")
         print(f"  Depth normalization: {self.depth_min_m:.2f}m to {self.depth_max_m:.2f}m")
 
         # Start virtual webcam sinks once metadata is known.
@@ -245,8 +243,33 @@ class WebcamBridgeReceiver:
             self.depth_writer.start()
             print(f"Depth virtual webcam (8-bit): {self.depth_device}")
 
-        if self.h264_pipe is None:
+        if self.rgb_encoding == "h264" and self.h264_pipe is None:
             self._start_h264_decoder(rgb_w, rgb_h)
+
+    def _process_rgb_packet(self, payload):
+        if self.rgb_encoding in ("jpeg", "jpg"):
+            rgb_array = np.frombuffer(payload, dtype=np.uint8)
+            rgb_image = cv2.imdecode(rgb_array, cv2.IMREAD_COLOR)
+            if rgb_image is None:
+                return
+
+            if self.rgb_writer:
+                if rgb_image.shape[1] != self.rgb_writer.width or rgb_image.shape[0] != self.rgb_writer.height:
+                    rgb_image = cv2.resize(
+                        rgb_image,
+                        (self.rgb_writer.width, self.rgb_writer.height),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                if self.rgb_writer.write(rgb_image.tobytes()):
+                    self.frames_published["rgb"] += 1
+            return
+
+        if self.h264_pipe and self.h264_pipe.stdin:
+            try:
+                self.h264_pipe.stdin.write(payload)
+                self.h264_pipe.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
 
     def _start_h264_decoder(self, width, height):
         ffmpeg_cmd = [

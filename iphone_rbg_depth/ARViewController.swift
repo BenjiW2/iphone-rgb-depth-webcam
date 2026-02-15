@@ -9,6 +9,7 @@ import UIKit
 import ARKit
 import AVFoundation
 import CoreMedia
+import Network
 
 class ARViewController: UIViewController, ARSessionDelegate {
 
@@ -21,6 +22,8 @@ class ARViewController: UIViewController, ARSessionDelegate {
     var fpsLabel: UILabel!
     var recordButton: UIButton!
     var recordingStatusLabel: UILabel!
+    var streamButton: UIButton!
+    var streamStatusLabel: UILabel!
 
     private var frameCount = 0
     private var lastFPSUpdate = Date()
@@ -32,12 +35,27 @@ class ARViewController: UIViewController, ARSessionDelegate {
     private var videoRecorder: VideoRecorder?
     private var isRecording = false
 
+    // Streaming components
+    private var tcpStreamer = TCPFrameStreamer()
+    private var isStreaming = false
+    private var streamConnected = false
+    private var rgbStreamFrameNumber: UInt32 = 0
+    private var depthStreamFrameNumber: UInt32 = 0
+    private var lastStreamFrameTime = Date.distantPast
+    private let streamFrameInterval: TimeInterval = 1.0 / 15.0
+    private let streamJPEGQuality: CGFloat = 0.6
+    private let streamHostDefaultsKey = "streamServerHost"
+    private let streamPortDefaultsKey = "streamServerPort"
+    private let defaultStreamHost = "172.20.10.2"  // Typical host IP over iPhone USB tethering
+    private let defaultStreamPort = 8888
+
     // MARK: - Lifecycle
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
         setupAR()
         checkLiDARAvailability()
+        setupStreamer()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -51,6 +69,10 @@ class ARViewController: UIViewController, ARSessionDelegate {
         // Stop recording if active
         if isRecording {
             stopRecording()
+        }
+
+        if isStreaming {
+            stopStreaming()
         }
     }
 
@@ -104,6 +126,15 @@ class ARViewController: UIViewController, ARSessionDelegate {
         fpsLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(fpsLabel)
 
+        // Streaming status label
+        streamStatusLabel = UILabel()
+        streamStatusLabel.text = "Network: Off"
+        streamStatusLabel.textColor = .orange
+        streamStatusLabel.textAlignment = .right
+        streamStatusLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        streamStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(streamStatusLabel)
+
         // Recording status label
         recordingStatusLabel = UILabel()
         recordingStatusLabel.text = "Ready to record"
@@ -124,6 +155,17 @@ class ARViewController: UIViewController, ARSessionDelegate {
         recordButton.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(recordButton)
 
+        // Stream button
+        streamButton = UIButton(type: .system)
+        streamButton.setTitle("📡 START STREAMING", for: .normal)
+        streamButton.setTitleColor(.white, for: .normal)
+        streamButton.backgroundColor = .systemBlue
+        streamButton.layer.cornerRadius = 18
+        streamButton.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .bold)
+        streamButton.addTarget(self, action: #selector(streamButtonTapped), for: .touchUpInside)
+        streamButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(streamButton)
+
         // Layout constraints
         NSLayoutConstraint.activate([
             stackView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 100),
@@ -133,13 +175,22 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
             statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
-            statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: streamButton.leadingAnchor, constant: -8),
 
             lidarStatusLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 5),
             lidarStatusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
 
             fpsLabel.topAnchor.constraint(equalTo: lidarStatusLabel.bottomAnchor, constant: 5),
             fpsLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+
+            streamButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
+            streamButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            streamButton.widthAnchor.constraint(equalToConstant: 180),
+            streamButton.heightAnchor.constraint(equalToConstant: 36),
+
+            streamStatusLabel.topAnchor.constraint(equalTo: streamButton.bottomAnchor, constant: 4),
+            streamStatusLabel.trailingAnchor.constraint(equalTo: streamButton.trailingAnchor),
+            streamStatusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: fpsLabel.trailingAnchor, constant: 8),
 
             recordingStatusLabel.bottomAnchor.constraint(equalTo: recordButton.topAnchor, constant: -10),
             recordingStatusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
@@ -291,6 +342,152 @@ class ARViewController: UIViewController, ARSessionDelegate {
         videoRecorder = nil
     }
 
+    // MARK: - Streaming Control
+
+    func setupStreamer() {
+        tcpStreamer.onStatusChanged = { [weak self] statusText, connected in
+            DispatchQueue.main.async {
+                self?.streamConnected = connected
+                self?.streamStatusLabel.text = statusText
+                self?.streamStatusLabel.textColor = connected ? .green : .orange
+            }
+        }
+    }
+
+    @objc func streamButtonTapped() {
+        if isStreaming {
+            stopStreaming()
+        } else {
+            showStreamingConfigPrompt()
+        }
+    }
+
+    func showStreamingConfigPrompt() {
+        let savedHost = UserDefaults.standard.string(forKey: streamHostDefaultsKey) ?? defaultStreamHost
+        let savedPort = UserDefaults.standard.integer(forKey: streamPortDefaultsKey)
+        let port = savedPort > 0 ? savedPort : defaultStreamPort
+
+        let alert = UIAlertController(
+            title: "Start Streaming",
+            message: "Tip: over USB tethering, your computer/Pi is often 172.20.10.2",
+            preferredStyle: .alert
+        )
+
+        alert.addTextField { textField in
+            textField.placeholder = "Server IP"
+            textField.text = savedHost
+            textField.keyboardType = .numbersAndPunctuation
+        }
+
+        alert.addTextField { textField in
+            textField.placeholder = "Port"
+            textField.text = "\(port)"
+            textField.keyboardType = .numberPad
+        }
+
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Start", style: .default) { [weak self] _ in
+            guard let self = self else { return }
+            let host = alert.textFields?[0].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let portText = alert.textFields?[1].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !host.isEmpty, let portInt = Int(portText), (1...65535).contains(portInt) else {
+                self.streamStatusLabel.text = "Network: Invalid host/port"
+                self.streamStatusLabel.textColor = .red
+                return
+            }
+
+            UserDefaults.standard.set(host, forKey: self.streamHostDefaultsKey)
+            UserDefaults.standard.set(portInt, forKey: self.streamPortDefaultsKey)
+            self.startStreaming(host: host, port: UInt16(portInt))
+        })
+
+        present(alert, animated: true)
+    }
+
+    func startStreaming(host: String, port: UInt16) {
+        let metadata = buildSessionMetadata()
+
+        isStreaming = true
+        streamConnected = false
+        rgbStreamFrameNumber = 0
+        depthStreamFrameNumber = 0
+        lastStreamFrameTime = Date.distantPast
+
+        streamButton.setTitle("🛑 STOP STREAMING", for: .normal)
+        streamButton.backgroundColor = .systemGray
+        streamStatusLabel.text = "Network: Connecting..."
+        streamStatusLabel.textColor = .orange
+
+        tcpStreamer.connect(host: host, port: port, metadata: metadata)
+    }
+
+    func stopStreaming() {
+        isStreaming = false
+        streamConnected = false
+        tcpStreamer.disconnect()
+
+        streamButton.setTitle("📡 START STREAMING", for: .normal)
+        streamButton.backgroundColor = .systemBlue
+        streamStatusLabel.text = "Network: Off"
+        streamStatusLabel.textColor = .orange
+    }
+
+    func buildSessionMetadata() -> [String: Any] {
+        var rgbWidth = 1920
+        var rgbHeight = 1440
+        var depthWidth = 256
+        var depthHeight = 192
+
+        if let currentFrame = arSession.currentFrame {
+            let rgbBuffer = currentFrame.capturedImage
+            rgbWidth = CVPixelBufferGetWidth(rgbBuffer)
+            rgbHeight = CVPixelBufferGetHeight(rgbBuffer)
+
+            if let depthBuffer = currentFrame.sceneDepth?.depthMap {
+                depthWidth = CVPixelBufferGetWidth(depthBuffer)
+                depthHeight = CVPixelBufferGetHeight(depthBuffer)
+            }
+        }
+
+        return [
+            "sessionId": UUID().uuidString,
+            "rgbWidth": rgbWidth,
+            "rgbHeight": rgbHeight,
+            "depthWidth": depthWidth,
+            "depthHeight": depthHeight,
+            "fps": Int(1.0 / streamFrameInterval),
+            "rgbBitrate": 0,
+            "rgbEncoding": "jpeg"
+        ]
+    }
+
+    func sendStreamFrames(rgbImage: UIImage?, depthPixelBuffer: CVPixelBuffer?, timestampSeconds: TimeInterval) {
+        guard isStreaming, streamConnected else { return }
+
+        if let rgbData = rgbImage?.jpegData(compressionQuality: streamJPEGQuality) {
+            rgbStreamFrameNumber &+= 1
+            tcpStreamer.sendFrame(
+                type: .rgb,
+                timestamp: timestampSeconds,
+                frameNumber: rgbStreamFrameNumber,
+                payload: rgbData,
+                isKeyFrame: true
+            )
+        }
+
+        if let depthBuffer = depthPixelBuffer,
+           let depthData = DepthCompressor.compress(depthBuffer, format: .png) {
+            depthStreamFrameNumber &+= 1
+            tcpStreamer.sendFrame(
+                type: .depth,
+                timestamp: timestampSeconds,
+                frameNumber: depthStreamFrameNumber,
+                payload: depthData,
+                isKeyFrame: false
+            )
+        }
+    }
+
     // MARK: - ARSessionDelegate
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
@@ -325,6 +522,11 @@ class ARViewController: UIViewController, ARSessionDelegate {
             }
         }
 
+        let shouldSendStreamFrame = isStreaming && now.timeIntervalSince(lastStreamFrameTime) >= streamFrameInterval
+        if shouldSendStreamFrame {
+            lastStreamFrameTime = now
+        }
+
         // Process on background queue for visualization
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else {
@@ -338,6 +540,14 @@ class ARViewController: UIViewController, ARSessionDelegate {
 
             if let depthBuffer = depthPixelBuffer {
                 depthImage = DepthImageConverter.convertDepthToImage(depthBuffer)
+            }
+
+            if shouldSendStreamFrame {
+                self.sendStreamFrames(
+                    rgbImage: rgbImage,
+                    depthPixelBuffer: depthPixelBuffer,
+                    timestampSeconds: frame.timestamp
+                )
             }
 
             // Update UI on main thread
@@ -388,5 +598,136 @@ class ARViewController: UIViewController, ARSessionDelegate {
             self.statusLabel.text = "AR Error: \(error.localizedDescription)"
             self.statusLabel.textColor = .red
         }
+    }
+}
+
+private enum StreamFrameType: UInt8 {
+    case rgb = 0x01
+    case depth = 0x02
+    case metadata = 0x03
+}
+
+private final class TCPFrameStreamer {
+    private var connection: NWConnection?
+    private let queue = DispatchQueue(label: "TCPFrameStreamerQueue")
+    private var pendingMetadata: [String: Any]?
+    private(set) var isConnected = false
+
+    var onStatusChanged: ((String, Bool) -> Void)?
+
+    func connect(host: String, port: UInt16, metadata: [String: Any]) {
+        queue.async {
+            self.disconnectLocked(shouldEmitStatus: false)
+            self.pendingMetadata = metadata
+
+            guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+                self.emitStatus("Network: Invalid port", false)
+                return
+            }
+
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+            self.connection = connection
+
+            connection.stateUpdateHandler = { [weak self] state in
+                self?.handleState(state)
+            }
+
+            self.emitStatus("Network: Connecting...", false)
+            connection.start(queue: self.queue)
+        }
+    }
+
+    func disconnect() {
+        queue.async {
+            self.disconnectLocked(shouldEmitStatus: true)
+        }
+    }
+
+    func sendFrame(type: StreamFrameType, timestamp: TimeInterval, frameNumber: UInt32, payload: Data, isKeyFrame: Bool) {
+        queue.async {
+            guard self.isConnected else { return }
+            self.sendPacket(type: type, timestamp: timestamp, frameNumber: frameNumber, payload: payload, isKeyFrame: isKeyFrame)
+        }
+    }
+
+    private func handleState(_ state: NWConnection.State) {
+        switch state {
+        case .ready:
+            isConnected = true
+            emitStatus("Network: Connected ✓", true)
+            sendPendingMetadata()
+
+        case .failed(let error):
+            isConnected = false
+            emitStatus("Network error: \(error.localizedDescription)", false)
+            disconnectLocked(shouldEmitStatus: false)
+
+        case .cancelled:
+            isConnected = false
+
+        default:
+            break
+        }
+    }
+
+    private func sendPendingMetadata() {
+        guard let metadata = pendingMetadata else { return }
+        guard let metadataData = try? JSONSerialization.data(withJSONObject: metadata, options: []) else {
+            emitStatus("Network: Metadata encode failed", false)
+            return
+        }
+
+        sendPacket(
+            type: .metadata,
+            timestamp: Date().timeIntervalSince1970,
+            frameNumber: 0,
+            payload: metadataData,
+            isKeyFrame: false
+        )
+
+        pendingMetadata = nil
+    }
+
+    private func sendPacket(type: StreamFrameType, timestamp: TimeInterval, frameNumber: UInt32, payload: Data, isKeyFrame: Bool) {
+        guard let connection = connection else { return }
+
+        var packet = Data(capacity: 18 + payload.count)
+
+        var frameType = type.rawValue
+        var timestampBits = timestamp.bitPattern.littleEndian
+        var frameNumberLE = frameNumber.littleEndian
+        var payloadSizeLE = UInt32(payload.count).littleEndian
+        var keyFlag: UInt8 = isKeyFrame ? 1 : 0
+
+        withUnsafeBytes(of: &frameType) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: &timestampBits) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: &frameNumberLE) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: &payloadSizeLE) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: &keyFlag) { packet.append(contentsOf: $0) }
+        packet.append(payload)
+
+        connection.send(content: packet, completion: .contentProcessed { [weak self] error in
+            guard let self = self else { return }
+            if let error = error {
+                self.isConnected = false
+                self.emitStatus("Network send error: \(error.localizedDescription)", false)
+            }
+        })
+    }
+
+    private func disconnectLocked(shouldEmitStatus: Bool) {
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+        pendingMetadata = nil
+        isConnected = false
+
+        if shouldEmitStatus {
+            emitStatus("Network: Off", false)
+        }
+    }
+
+    private func emitStatus(_ text: String, _ connected: Bool) {
+        onStatusChanged?(text, connected)
     }
 }

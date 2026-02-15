@@ -40,6 +40,21 @@ Optional:
 
 Set the iPhone sender to connect to your Linux/Pi IP on port `8888`.
 
+### Wired (USB cable) recommendation
+
+For a cable link instead of WiFi, use iPhone USB tethering and target the host USB IP.
+
+- Typical iPhone USB subnet is `172.20.10.x`.
+- Host/Pi is often `172.20.10.2`.
+- iPhone side should connect to that host IP on port `8888`.
+
+If no USB network interface appears on Linux/Pi:
+
+```bash
+sudo modprobe ipheth
+ip addr
+```
+
 ## 5) Verify both webcams locally
 
 List formats:
