@@ -124,6 +124,22 @@ Each frame packet contains:
    - Receiver will display RGB and depth streams
    - Press 'q' in the receiver window to quit
 
+### Virtual Webcam Mode (Linux / Raspberry Pi)
+
+If you want RGB + depth to appear as two webcam devices:
+
+1. Create loopback webcams (Linux):
+   ```bash
+   sudo modprobe -r v4l2loopback 2>/dev/null || true
+   sudo modprobe v4l2loopback devices=2 video_nr=10,11 card_label="iPhone RGB","iPhone Depth" exclusive_caps=1
+   ```
+2. Start webcam bridge:
+   ```bash
+   python3 receiver_virtual_webcam.py --rgb-device /dev/video10 --depth-device /dev/video11
+   ```
+3. Full setup and verification steps are in:
+   - `PI_WEBCAM_QUICKSTART.md`
+
 ### Recording Mode
 
 1. **Grant Photos permission**
@@ -148,7 +164,9 @@ iphone_rgb_depth/
 │   ├── DepthImageConverter.swift   # Depth processing utilities
 │   ├── DepthCompressor.swift       # Depth PNG compression
 │   └── iphone_rbg_depthApp.swift  # App entry point
-├── receiver.py                     # Python receiver script
+├── receiver.py                     # Python display receiver
+├── receiver_virtual_webcam.py      # Linux/Pi virtual webcam bridge (RGB + depth 8-bit)
+├── PI_WEBCAM_QUICKSTART.md         # Virtual webcam setup guide
 ├── iphone_rbg_depth.xcodeproj/    # Xcode project
 └── README.md                       # This file
 ```
