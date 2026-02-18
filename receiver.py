@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 RGB + Depth Receiver
-Receives H.264 RGB and PNG depth streams from iPhone
+Receives JPEG/H.264 RGB and PNG depth streams from iPhone
 """
 
 import socket
@@ -11,7 +11,6 @@ import cv2
 import numpy as np
 from datetime import datetime
 import subprocess
-import os
 import threading
 
 # Frame types
@@ -30,6 +29,7 @@ class FrameReceiver:
         self.server_socket = None
         self.client_socket = None
         self.metadata = None
+        self.rgb_encoding = 'h264'
 
         # Stats
         self.frames_received = {'rgb': 0, 'depth': 0}
@@ -61,9 +61,6 @@ class FrameReceiver:
 
         self.start_time = datetime.now()
 
-        # Start H.264 decoder
-        self.start_h264_decoder()
-
     def start_h264_decoder(self):
         """Start FFmpeg process for H.264 decoding"""
         ffmpeg_cmd = [
@@ -75,17 +72,23 @@ class FrameReceiver:
             'pipe:1'
         ]
 
-        self.h264_pipe = subprocess.Popen(
-            ffmpeg_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=10**8
-        )
+        try:
+            self.h264_pipe = subprocess.Popen(
+                ffmpeg_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=10**8
+            )
+        except FileNotFoundError:
+            print("❌ FFmpeg not found. Cannot decode H.264 RGB stream.")
+            self.h264_pipe = None
+            return False
 
         # Start thread to read decoded frames
         self.decoder_thread = threading.Thread(target=self._decode_h264_frames, daemon=True)
         self.decoder_thread.start()
+        return True
 
     def _decode_h264_frames(self):
         """Background thread to decode H.264 frames"""
@@ -167,33 +170,48 @@ class FrameReceiver:
         if frame_type == FRAME_TYPE_METADATA:
             # Parse metadata
             self.metadata = json.loads(frame['data'].decode('utf-8'))
+            self.rgb_encoding = str(self.metadata.get('rgbEncoding', 'h264')).lower()
             print(f"\n📋 Session Metadata:")
-            print(f"   Session ID: {self.metadata['sessionId']}")
-            print(f"   RGB: {self.metadata['rgbWidth']}x{self.metadata['rgbHeight']}")
-            print(f"   Depth: {self.metadata['depthWidth']}x{self.metadata['depthHeight']}")
-            print(f"   FPS: {self.metadata['fps']}")
-            print(f"   RGB Bitrate: {self.metadata['rgbBitrate'] / 1_000_000:.1f} Mbps")
+            print(f"   Session ID: {self.metadata.get('sessionId', 'unknown')}")
+            print(f"   RGB: {self.metadata.get('rgbWidth', 1920)}x{self.metadata.get('rgbHeight', 1440)}")
+            print(f"   Depth: {self.metadata.get('depthWidth', 256)}x{self.metadata.get('depthHeight', 192)}")
+            print(f"   FPS: {self.metadata.get('fps', 'unknown')}")
+            print(f"   RGB Encoding: {self.rgb_encoding}")
+
+            rgb_bitrate = self.metadata.get('rgbBitrate')
+            if isinstance(rgb_bitrate, (int, float)):
+                print(f"   RGB Bitrate: {rgb_bitrate / 1_000_000:.1f} Mbps")
             print()
 
-            # Restart decoder thread now that we have metadata
-            if self.decoder_thread and not self.decoder_thread.is_alive():
-                self.decoder_thread = threading.Thread(target=self._decode_h264_frames, daemon=True)
-                self.decoder_thread.start()
-                print("✅ H.264 decoder thread started")
+            if self.rgb_encoding == 'h264':
+                if self.h264_pipe is None:
+                    if self.start_h264_decoder():
+                        print("✅ H.264 decoder started")
+                elif self.decoder_thread and not self.decoder_thread.is_alive():
+                    self.decoder_thread = threading.Thread(target=self._decode_h264_frames, daemon=True)
+                    self.decoder_thread.start()
+                    print("✅ H.264 decoder thread restarted")
 
         elif frame_type == FRAME_TYPE_RGB:
-            # Send H.264 data to decoder
-            if self.h264_pipe:
-                try:
-                    self.h264_pipe.stdin.write(frame['data'])
-                    self.h264_pipe.stdin.flush()
-                except:
-                    pass
+            if self.rgb_encoding in ('jpeg', 'jpg'):
+                rgb_array = np.frombuffer(frame['data'], dtype=np.uint8)
+                rgb_image = cv2.imdecode(rgb_array, cv2.IMREAD_COLOR)
+                if rgb_image is not None:
+                    with self.rgb_lock:
+                        self.latest_rgb_frame = rgb_image
+            else:
+                # Send H.264 data to decoder
+                if self.h264_pipe:
+                    try:
+                        self.h264_pipe.stdin.write(frame['data'])
+                        self.h264_pipe.stdin.flush()
+                    except:
+                        pass
 
             self.frames_received['rgb'] += 1
             self.bytes_received['rgb'] += frame['data_size']
 
-            if frame['is_key']:
+            if frame['is_key'] and self.rgb_encoding == 'h264':
                 print(f"🔑 Keyframe #{frame['frame_num']}: {frame['data_size'] / 1024:.1f} KB")
 
         elif frame_type == FRAME_TYPE_DEPTH:
@@ -254,14 +272,12 @@ def main():
     print("=" * 60)
     print()
 
-    # Check if FFmpeg is available
+    # FFmpeg is only required for H.264 streams. JPEG streams work without it.
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
     except:
-        print("❌ FFmpeg not found! Please install:")
-        print("   Mac: brew install ffmpeg")
-        print("   Linux: sudo apt-get install ffmpeg")
-        return
+        print("⚠️ FFmpeg not found. H.264 streams will not decode.")
+        print("   Install with: brew install ffmpeg (Mac) or sudo apt-get install ffmpeg (Linux)")
 
     receiver = FrameReceiver(host='0.0.0.0', port=8888)
 

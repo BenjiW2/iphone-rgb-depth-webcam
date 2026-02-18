@@ -1,250 +1,305 @@
-# iPhone RGB + LiDAR Depth Capture & Streaming
+# iPhone RGB + LiDAR Depth Streaming
 
-Real-time RGB camera and LiDAR depth data capture from iPhone with network streaming and local recording capabilities.
+Realtime RGB + depth capture from an iPhone Pro device, with two primary receiver paths:
 
-## Overview
+- macOS/Linux display receiver for validation and OBS integration
+- Linux/Raspberry Pi virtual webcam bridge for robotics pipelines
 
-This project captures synchronized RGB video and LiDAR depth data from iPhone Pro models (with LiDAR scanner) and provides two modes of operation:
+This repository also supports local on-device recording to Photos.
 
-1. **Network Streaming**: Stream RGB (H.264) and depth (PNG) data over TCP to a computer running the Python receiver
-2. **Local Recording**: Record RGB and depth video directly to the iPhone's Photos library
+## What Works Where
 
-The system uses ARKit for camera/LiDAR access, hardware-accelerated H.264 encoding for RGB, and PNG compression for depth maps. The Python receiver decodes streams in real-time using FFmpeg and OpenCV.
+| Goal | iPhone | macOS | Linux / Raspberry Pi |
+|---|---|---|---|
+| Capture RGB + LiDAR depth | ✅ | N/A | N/A |
+| Stream over TCP (USB or WiFi) | ✅ | ✅ | ✅ |
+| Preview RGB + depth windows (`receiver.py`) | N/A | ✅ | ✅ |
+| Feed two virtual webcam devices (`/dev/video*`) | N/A | ❌ | ✅ |
+| Use in OBS | N/A | ✅ | ✅ |
+| Use in Photo Booth | N/A | ✅ (via OBS Virtual Camera) | N/A |
 
-## How It Works
+## Current Stream Format
 
-### iPhone App (Sender)
+The current iPhone streaming path sends:
 
-1. **ARKit Session**: Captures RGB frames (1920x1440) and depth maps (256x192) from the iPhone's camera and LiDAR scanner
-2. **RGB Encoding**: Uses VideoToolbox hardware encoder to compress RGB frames to H.264 format
-3. **Depth Compression**: Converts Float32 depth data to 16-bit PNG images for efficient transmission
-4. **Network Streaming**: Sends frames over TCP with custom protocol (frame type, timestamp, size headers)
-5. **Local Recording**: Optionally records both streams to separate .mov files saved to Photos
+- `RGB`: JPEG frames
+- `Depth`: PNG (16-bit depth in millimeters)
+- Transport: TCP custom packet protocol (18-byte header + payload)
 
-### Python Receiver
+Header layout:
 
-1. **TCP Server**: Listens on port 8888 for incoming iPhone connection
-2. **H.264 Decoding**: Uses FFmpeg subprocess to decode RGB stream in real-time
-3. **Depth Decoding**: Uses OpenCV to decode PNG depth frames
-4. **Display**: Shows both RGB and depth (colorized) streams in separate windows with statistics
+- `type` (1 byte): RGB `0x01`, Depth `0x02`, Metadata `0x03`
+- `timestamp` (8 bytes, little-endian double)
+- `frame_number` (4 bytes, little-endian uint32)
+- `payload_size` (4 bytes, little-endian uint32)
+- `is_key` (1 byte)
 
-### Protocol
+## Repository Layout
 
-Each frame packet contains:
-- Header (18 bytes): frame type (1), timestamp (8), frame number (4), data size (4), keyframe flag (1)
-- Payload: H.264 NAL units (RGB) or PNG data (depth)
-
-## Requirements
-
-### iPhone App
-- **Device**: iPhone 12 Pro or later (requires LiDAR scanner)
-- **iOS**: 14.0 or later
-- **Xcode**: 13.0 or later
-- **macOS**: Big Sur or later (for development)
-
-### Python Receiver
-- **Python**: 3.7+
-- **FFmpeg**: Required for H.264 decoding
-- **Dependencies**: opencv-python, numpy
-
-## Installation & Setup
-
-### 1. iPhone App Setup
-
-1. **Clone the repository**
-   ```bash
-   git clone <repo-url>
-   cd iphone_rgb_depth
-   ```
-
-2. **Open in Xcode**
-   ```bash
-   open iphone_rbg_depth.xcodeproj
-   ```
-
-3. **Configure signing**
-   - Select the project in Xcode
-   - Go to "Signing & Capabilities"
-   - Select your development team
-   - Xcode will automatically create a provisioning profile
-
-4. **Connect iPhone**
-   - Connect your iPhone 12 Pro or later via USB
-   - Trust the computer if prompted
-   - Select your device as the build target
-
-5. **Build and run**
-   - Press Cmd+R or click the Run button
-   - Grant camera permission when prompted
-
-### 2. Python Receiver Setup
-
-1. **Install FFmpeg**
-   ```bash
-   # macOS
-   brew install ffmpeg
-
-   # Linux
-   sudo apt-get install ffmpeg
-   ```
-
-2. **Create virtual environment (recommended)**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**
-   ```bash
-   pip install opencv-python numpy
-   ```
-
-## Usage
-
-### Streaming Mode
-
-1. **Start the receiver on your computer**
-   ```bash
-   python3 receiver.py
-   ```
-
-   You should see:
-   ```
-   🎧 Server listening on 0.0.0.0:8888
-   📱 Waiting for iPhone connection...
-   ```
-
-2. **Configure iPhone app**
-   - Make sure iPhone and computer are on the same WiFi network
-   - In the app, enter your computer's IP address (e.g., 192.168.1.100)
-   - Port should be 8888
-
-3. **Start streaming**
-   - Tap "Start Streaming" button in the iPhone app
-   - Receiver will display RGB and depth streams
-   - Press 'q' in the receiver window to quit
-
-### Virtual Webcam Mode (Linux / Raspberry Pi)
-
-If you want RGB + depth to appear as two webcam devices:
-
-1. Create loopback webcams (Linux):
-   ```bash
-   sudo modprobe -r v4l2loopback 2>/dev/null || true
-   sudo modprobe v4l2loopback devices=2 video_nr=10,11 card_label="iPhone RGB","iPhone Depth" exclusive_caps=1
-   ```
-2. Start webcam bridge:
-   ```bash
-   python3 receiver_virtual_webcam.py --rgb-device /dev/video10 --depth-device /dev/video11
-   ```
-   On iPhone, tap `START STREAMING`, enter host IP (USB tethering is often `172.20.10.2`) and port `8888`.
-3. Full setup and verification steps are in:
-   - `PI_WEBCAM_QUICKSTART.md`
-
-### Recording Mode
-
-1. **Grant Photos permission**
-   - When first recording, the app will request Photos access
-   - Grant permission in Settings if needed
-
-2. **Start/Stop recording**
-   - Tap "Start Recording" button
-   - Record your scene (RGB and depth are captured simultaneously)
-   - Tap "Stop Recording"
-   - Videos are automatically saved to Photos library as separate files
-
-## Project Structure
-
-```
+```text
 iphone_rgb_depth/
-├── iphone_rbg_depth/               # iOS app source
-│   ├── ARViewController.swift      # Main ARKit controller
-│   ├── ARViewControllerRepresentable.swift  # SwiftUI wrapper
-│   ├── ContentView.swift           # App UI
-│   ├── VideoRecorder.swift         # Local recording functionality
-│   ├── DepthImageConverter.swift   # Depth processing utilities
-│   ├── DepthCompressor.swift       # Depth PNG compression
-│   └── iphone_rbg_depthApp.swift  # App entry point
-├── receiver.py                     # Python display receiver
-├── receiver_virtual_webcam.py      # Linux/Pi virtual webcam bridge (RGB + depth 8-bit)
-├── PI_WEBCAM_QUICKSTART.md         # Virtual webcam setup guide
-├── iphone_rbg_depth.xcodeproj/    # Xcode project
-└── README.md                       # This file
+├── iphone_rbg_depth/
+│   ├── ARViewController.swift
+│   ├── VideoRecorder.swift
+│   ├── DepthCompressor.swift
+│   └── ...
+├── receiver.py                    # Cross-platform preview receiver (OpenCV windows)
+├── receiver_virtual_webcam.py     # Linux/Pi bridge to /dev/video* (RGB + depth 8-bit)
+├── PI_WEBCAM_QUICKSTART.md        # Linux/Pi focused setup
+└── README.md
 ```
 
-## Current Status
+## iPhone Setup (Sender)
 
-### ✅ Completed Features
+Requirements:
 
-- ✅ ARKit session with LiDAR support
-- ✅ RGB frame capture (1920x1440)
-- ✅ Depth frame capture (256x192)
-- ✅ Hardware H.264 encoding (VideoToolbox)
-- ✅ PNG depth compression
-- ✅ Network streaming (TCP protocol)
-- ✅ Python receiver with FFmpeg decoding
-- ✅ Real-time display (RGB + depth visualization)
-- ✅ Local recording to .mov files
-- ✅ Photos library integration
-- ✅ FPS monitoring and statistics
-- ✅ LiDAR availability detection
+- iPhone 12 Pro or later (LiDAR required)
+- Xcode + Apple signing setup
 
-### 🚧 Known Limitations
+Build:
 
-- Network streaming requires manual IP configuration
-- No automatic reconnection on network failure
-- Depth range fixed to 0.5-5.0 meters
-- Recording orientation locked to portrait
+1. Open `iphone_rbg_depth.xcodeproj`.
+2. Configure signing in Xcode target settings.
+3. Connect iPhone via USB and trust the computer.
+4. Build and run.
+5. Grant camera and local-network permissions when prompted.
 
-## Technical Details
+In-app controls:
 
-### Video Specifications
+- `START RECORDING`: saves RGB+depth videos to Photos
+- `START STREAMING`: prompts for receiver host + port (default host is USB-friendly `172.20.10.2`)
 
-| Stream | Resolution | Format | Bitrate | FPS |
-|--------|-----------|--------|---------|-----|
-| RGB | 1920x1440 | H.264 | 2 Mbps | 30 |
-| Depth | 256x192 | PNG (16-bit) | ~100-200 KB/frame | 30 |
+## Transport: USB Cable First (Recommended)
 
-### Performance
+Use iPhone Personal Hotspot over USB.
 
-- **Latency**: Typically 50-150ms end-to-end (network dependent)
-- **CPU Usage**: ~30-40% on iPhone (hardware encoding)
-- **Network Bandwidth**: ~2-3 Mbps total
+### On iPhone
+
+1. Connect iPhone to host (Mac/Linux/Pi) via cable.
+2. Enable `Settings > Personal Hotspot`.
+
+### On host
+
+- Typical USB tether subnet is `172.20.10.x`.
+- Host is often `172.20.10.2`.
+- Start receiver on port `8888` and use that host IP in iPhone stream dialog.
+
+Linux note if no USB network appears:
+
+```bash
+sudo modprobe ipheth
+ip addr
+```
+
+WiFi is also supported as fallback.
+
+## Workflow A: macOS + OBS (+ Photo Booth)
+
+This is the easiest validation path on Mac.
+
+### 1) Install dependencies
+
+```bash
+brew install ffmpeg
+python3 -m venv venv
+source venv/bin/activate
+pip install opencv-python numpy
+```
+
+### 2) Start receiver on Mac
+
+```bash
+python3 receiver.py
+```
+
+It opens two windows:
+
+- `RGB Stream`
+- `Depth Stream`
+
+### 3) Start iPhone streaming
+
+- Tap `START STREAMING`
+- Enter host IP (USB often `172.20.10.2`)
+- Port `8888`
+
+### 4) Add sources in OBS
+
+Option 1 (recommended on Mac):
+
+1. Add `Window Capture` source for `RGB Stream` window.
+2. Add `Window Capture` source for `Depth Stream` window.
+3. Build one scene per stream, or a combined scene.
+
+Option 2:
+
+- Use display capture and crop, but window capture is cleaner.
+
+### 5) Make it visible to Photo Booth
+
+1. In OBS, click `Start Virtual Camera`.
+2. Open Photo Booth.
+3. Select camera source `OBS Virtual Camera`.
+
+Notes:
+
+- Photo Booth gets one virtual camera feed at a time (whatever scene OBS virtual camera outputs).
+- macOS does not use `v4l2loopback`, so the Linux virtual-webcam script does not apply on Mac.
+
+## Workflow B: Linux / Raspberry Pi Robotics (Two Virtual Webcams)
+
+This path exposes two camera devices for robotics tools.
+
+### 1) Install dependencies
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg python3-opencv python3-numpy v4l2loopback-dkms v4l2loopback-utils v4l-utils
+```
+
+### 2) Create loopback devices
+
+```bash
+sudo modprobe -r v4l2loopback 2>/dev/null || true
+sudo modprobe v4l2loopback devices=2 video_nr=10,11 card_label="iPhone RGB","iPhone Depth" exclusive_caps=1
+```
+
+Expected devices:
+
+- `/dev/video10` = RGB
+- `/dev/video11` = Depth (8-bit normalized)
+
+### 3) Start virtual webcam bridge
+
+```bash
+python3 receiver_virtual_webcam.py --host 0.0.0.0 --port 8888 --rgb-device /dev/video10 --depth-device /dev/video11 --depth-min-m 0.3 --depth-max-m 5.0
+```
+
+Optional:
+
+- `--invert-depth` (near bright, far dark)
+
+### 4) Start iPhone streaming
+
+- Host IP: Pi/host USB IP (often `172.20.10.2`) or WiFi IP
+- Port: `8888`
+
+### 5) Validate devices
+
+```bash
+v4l2-ctl -d /dev/video10 --list-formats-ext
+v4l2-ctl -d /dev/video11 --list-formats-ext
+```
+
+```bash
+ffplay -f v4l2 -framerate 30 -video_size 640x480 /dev/video10
+ffplay -f v4l2 -framerate 30 -video_size 640x480 /dev/video11
+```
+
+### 6) Use in OpenCV
+
+```python
+import cv2
+
+rgb = cv2.VideoCapture('/dev/video10')
+depth = cv2.VideoCapture('/dev/video11')
+
+while True:
+    ok1, f1 = rgb.read()
+    ok2, f2 = depth.read()
+    if ok1:
+        cv2.imshow('rgb', f1)
+    if ok2:
+        cv2.imshow('depth8', f2)
+    if cv2.waitKey(1) == ord('q'):
+        break
+```
+
+### 7) Use in ROS 2 (example)
+
+If using `v4l2_camera` package, run one node per device:
+
+```bash
+ros2 run v4l2_camera v4l2_camera_node --ros-args -p video_device:=/dev/video10 -p image_size:=[1920,1440]
+ros2 run v4l2_camera v4l2_camera_node --ros-args -p video_device:=/dev/video11 -p image_size:=[256,192]
+```
+
+Adjust parameters to your distro/package version.
+
+## Workflow C: On-Phone Only (No Receiver)
+
+If you do not need live streaming:
+
+1. Use `START RECORDING`.
+2. Capture scene.
+3. Stop recording.
+4. RGB + depth videos are saved to Photos.
+
+## Receiver Scripts
+
+### `receiver.py`
+
+- Cross-platform preview (`RGB Stream` + `Depth Stream` windows)
+- Supports current JPEG RGB metadata and legacy H.264 streams
+- Good for Mac validation and OBS window capture workflows
+
+### `receiver_virtual_webcam.py`
+
+- Linux only
+- Converts stream to two `/dev/video*` outputs via `v4l2loopback`
+- Depth output is normalized to 8-bit for compatibility
+
+## OBS Integration Summary
+
+- macOS: use `receiver.py` + `Window Capture`; use OBS Virtual Camera for Photo Booth/Zoom/Meet.
+- Linux: either use `receiver.py` window capture or directly add `/dev/video10` and `/dev/video11` as `Video Capture Device` sources.
+
+## Tuning
+
+### iPhone sender (`iphone_rbg_depth/ARViewController.swift`)
+
+- Stream FPS target: `streamFrameInterval`
+- RGB JPEG quality: `streamJPEGQuality`
+
+### Linux depth normalization (`receiver_virtual_webcam.py`)
+
+- `--depth-min-m`
+- `--depth-max-m`
+- `--invert-depth`
 
 ## Troubleshooting
 
-### iPhone App Issues
+### iPhone cannot connect
 
-**App crashes on launch**
-- Ensure device has LiDAR (iPhone 12 Pro or later)
-- Check camera permissions in Settings
+- Confirm host IP + port in iPhone dialog.
+- Confirm receiver is already running.
+- Confirm firewall allows TCP `8888`.
+- On USB tethering, verify host interface has `172.20.10.x` address.
 
-**"LiDAR Not Supported" message**
-- Verify device model (must be iPhone 12 Pro, 13 Pro, 14 Pro, 15 Pro)
-- Restart the app
+### `receiver.py` shows no RGB
 
-### Receiver Issues
+- Check metadata print for `RGB Encoding`.
+- If using H.264 sender path, install FFmpeg.
+- For JPEG sender path (current app), FFmpeg is optional.
 
-**"FFmpeg not found" error**
-- Install FFmpeg: `brew install ffmpeg` (Mac) or `sudo apt-get install ffmpeg` (Linux)
-- Verify: `ffmpeg -version`
+### Linux virtual webcams not appearing
 
-**Connection timeout**
-- Ensure iPhone and computer on same WiFi
-- Check firewall settings (allow port 8888)
-- Verify IP address is correct
+- Re-run `modprobe v4l2loopback ...` command.
+- Check `ls /dev/video*`.
+- Ensure `receiver_virtual_webcam.py` points to correct device IDs.
 
-**No video display**
-- Check that OpenCV windows appear (may be in another desktop/space)
-- Press 'q' to quit if windows are frozen
+### High latency or dropped frames
 
-## Development Notes
+- Prefer USB transport over WiFi.
+- Lower stream rate (increase `streamFrameInterval`).
+- Reduce JPEG quality (`streamJPEGQuality`) on iPhone.
 
-- Built with Swift 5.0+ and SwiftUI
-- Uses ARKit, AVFoundation, VideoToolbox, Network frameworks
-- Requires physical device (LiDAR not available in simulator)
-- Python receiver uses subprocess for FFmpeg integration
+## Known Limits
 
-## License
+- macOS cannot use Linux `v4l2loopback` virtual webcams.
+- Photo Booth accepts one OBS virtual camera output at a time.
+- Depth virtual webcam path is 8-bit normalized for compatibility (not metric depth fidelity).
 
-Educational/Personal Project
+## Additional Doc
+
+- Linux/Pi quickstart: `PI_WEBCAM_QUICKSTART.md`
